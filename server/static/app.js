@@ -9,6 +9,7 @@ const state = {
   devices: [],
   showKnownOnly: false,
   refreshTimer: null,
+  editingReceivers: false,
   map: null,
   receiverMarkers: new Map(),
   deviceLayers: new Map(),
@@ -55,6 +56,14 @@ function init() {
   els.devicesTableBody.addEventListener("click", handleDeviceTableClick);
   els.receiverList.addEventListener("submit", handleReceiverRename);
   els.receiverList.addEventListener("click", handleReceiverClick);
+  els.receiverList.addEventListener("focusin", () => {
+    state.editingReceivers = true;
+  });
+  els.receiverList.addEventListener("focusout", () => {
+    window.setTimeout(() => {
+      state.editingReceivers = els.receiverList.contains(document.activeElement);
+    }, 0);
+  });
 
   initMap();
   render();
@@ -212,13 +221,20 @@ async function handleReceiverRename(event) {
   if (!form) return;
 
   const receiverId = form.dataset.receiverId;
-  const input = form.querySelector("input[name='label']");
-  els.receiverActionStatus.textContent = "Renaming";
+  const labelInput = form.querySelector("input[name='label']");
+  const latitudeInput = form.querySelector("input[name='latitude']");
+  const longitudeInput = form.querySelector("input[name='longitude']");
+  els.receiverActionStatus.textContent = "Saving";
   try {
+    state.editingReceivers = false;
+    const latitude = parseCoordinate(latitudeInput.value, -90, 90, "latitude");
+    const longitude = parseCoordinate(longitudeInput.value, -180, 180, "longitude");
     await apiPatch(`/receivers/${encodeURIComponent(receiverId)}`, {
-      label: input.value.trim(),
+      label: labelInput.value.trim(),
+      latitude,
+      longitude,
     });
-    els.receiverActionStatus.textContent = "Renamed";
+    els.receiverActionStatus.textContent = "Saved";
     await refreshAll();
   } catch (error) {
     els.receiverActionStatus.textContent = error.message;
@@ -277,7 +293,9 @@ function render() {
   els.receiverCount.textContent = String(state.receivers.length);
 
   renderDevicesTable(visibleRows);
-  renderReceivers();
+  if (!state.editingReceivers) {
+    renderReceivers();
+  }
   renderMap(visibleRows.filter((row) => row.hasPosition));
 }
 
@@ -376,8 +394,28 @@ function renderReceivers() {
           <span>Label</span>
           <input name="label" value="${escapeHtml(receiver.label || receiver.id)}" maxlength="80">
         </label>
+        <div class="coordinate-grid">
+          <label>
+            <span>Latitude</span>
+            <input
+              name="latitude"
+              inputmode="decimal"
+              value="${numberLabel(receiver.latitude, 6)}"
+              placeholder="33.905150"
+            >
+          </label>
+          <label>
+            <span>Longitude</span>
+            <input
+              name="longitude"
+              inputmode="decimal"
+              value="${numberLabel(receiver.longitude, 6)}"
+              placeholder="-86.053748"
+            >
+          </label>
+        </div>
         <div class="action-row">
-          <button class="button button-small" type="submit">Rename</button>
+          <button class="button button-small" type="submit">Save</button>
           <button
             class="button button-small button-danger"
             type="button"
@@ -594,6 +632,17 @@ function secondsSince(isoValue, nowMs = Date.now()) {
 function numberLabel(value, digits) {
   const number = Number(value);
   return Number.isFinite(number) ? number.toFixed(digits) : "-";
+}
+
+function parseCoordinate(value, min, max, label) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    throw new Error(`Invalid ${label}`);
+  }
+  if (number < min || number > max) {
+    throw new Error(`${label} out of range`);
+  }
+  return number;
 }
 
 function plural(count, singular, pluralValue) {

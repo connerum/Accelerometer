@@ -423,6 +423,17 @@ tbody tr:hover {
   gap: 8px;
 }
 
+.coordinate-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.coordinate-grid label {
+  display: grid;
+  gap: 6px;
+}
+
 .action-row {
   display: flex;
   gap: 8px;
