@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <cctype>
 #include <limits>
 #include <string>
 
@@ -99,6 +100,24 @@ uint32_t lastButtonClickMs = 0;
 
 bool httpReportingConfigured() {
   return std::strlen(kWifiSsid) > 0 && std::strlen(kReportUrl) > 0;
+}
+
+char lowerAscii(char value) {
+  return static_cast<char>(std::tolower(static_cast<unsigned char>(value)));
+}
+
+bool equalsIgnoreCase(const std::string &left, const char *right) {
+  if (left.length() != std::strlen(right)) {
+    return false;
+  }
+
+  for (size_t i = 0; i < left.length(); ++i) {
+    if (lowerAscii(left[i]) != lowerAscii(right[i])) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 const char *wifiStatusName(wl_status_t status) {
@@ -381,13 +400,14 @@ class TargetCallbacks final : public BLEAdvertisedDeviceCallbacks {
 public:
   void onResult(BLEAdvertisedDevice device) override {
     const std::string address = device.getAddress().toString();
-    if (address != kTargetMac) {
+    if (!equalsIgnoreCase(address, kTargetMac)) {
       return;
     }
 
     const uint32_t now = millis();
     lastSeenMs = now;
     lastRssi = device.getRSSI();
+    Serial.printf("[%lu ms] badge=seen mac=%s rssi=%d\n", now, address.c_str(), lastRssi);
     readIBeaconTxPowerIfPresent(device);
 
     for (int i = 0; i < device.getServiceDataCount(); ++i) {
