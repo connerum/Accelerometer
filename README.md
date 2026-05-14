@@ -76,6 +76,11 @@ build_flags =
   -D TARGET_BADGE_MAC=\"e0:15:6b:37:a2:02\"
 ```
 
+```ini
+-D REPORT_URL=\"http://46.224.173.239/report\"
+-D HTTP_API_KEY=\"6cd60369f23504945829520b4e072ab0581bf785164b7babc8a6ca9c8a72fd13\"
+```
+
 Use different `RECEIVER_ID`, `RECEIVER_LAT`, and `RECEIVER_LNG` values for the
 three ESP32s.
 

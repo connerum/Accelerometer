@@ -51,7 +51,7 @@ namespace {
 #endif
 
 #ifndef TARGET_BADGE_MAC
-#define TARGET_BADGE_MAC "e0:15:6b:37:a2:02"
+#define TARGET_BADGE_MAC "45:C6:6A:F3:36:61"
 #endif
 
 constexpr char kTargetMac[] = TARGET_BADGE_MAC;
@@ -67,6 +67,7 @@ constexpr uint16_t kHolyIotServiceUuid = 0x5242;
 constexpr uint32_t kScanDurationSeconds = 5;
 constexpr uint32_t kStatusPrintIntervalMs = 2000;
 constexpr uint32_t kHttpReportIntervalMs = 2000;
+constexpr uint32_t kReceiverHeartbeatIntervalMs = 30000;
 constexpr uint32_t kWifiReconnectIntervalMs = 10000;
 constexpr uint16_t kHttpTimeoutMs = 1500;
 constexpr uint32_t kMovementHoldMs = 1200;
@@ -77,7 +78,9 @@ constexpr float kSpeedFilterAlpha = 0.35f;
 
 BLEScan *scan = nullptr;
 uint32_t lastWifiAttemptMs = 0;
+uint32_t lastWifiStatusPrintMs = 0;
 uint32_t lastHttpReportMs = 0;
+uint32_t lastReceiverHeartbeatMs = 0;
 uint32_t lastSeenMs = 0;
 int lastRssi = -127;
 bool lastMovement = false;
@@ -98,21 +101,73 @@ bool httpReportingConfigured() {
   return std::strlen(kWifiSsid) > 0 && std::strlen(kReportUrl) > 0;
 }
 
+const char *wifiStatusName(wl_status_t status) {
+  switch (status) {
+  case WL_IDLE_STATUS:
+    return "idle";
+  case WL_NO_SSID_AVAIL:
+    return "no_ssid_available";
+  case WL_SCAN_COMPLETED:
+    return "scan_completed";
+  case WL_CONNECTED:
+    return "connected";
+  case WL_CONNECT_FAILED:
+    return "connect_failed";
+  case WL_CONNECTION_LOST:
+    return "connection_lost";
+  case WL_DISCONNECTED:
+    return "disconnected";
+  default:
+    return "unknown";
+  }
+}
+
+void printWifiStatusIfChanged(bool force = false) {
+  static wl_status_t lastPrintedStatus = static_cast<wl_status_t>(255);
+  const uint32_t now = millis();
+  const wl_status_t status = WiFi.status();
+
+  if (!force && status == lastPrintedStatus && now - lastWifiStatusPrintMs < 10000) {
+    return;
+  }
+
+  lastPrintedStatus = status;
+  lastWifiStatusPrintMs = now;
+
+  if (status == WL_CONNECTED) {
+    Serial.printf("[%lu ms] wifi=connected ip=%s rssi=%d\n", now,
+                  WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    return;
+  }
+
+  Serial.printf("[%lu ms] wifi=status status=%s code=%d\n", now,
+                wifiStatusName(status), static_cast<int>(status));
+}
+
 void connectWifiIfNeeded() {
-  if (!httpReportingConfigured() || WiFi.status() == WL_CONNECTED) {
+  if (!httpReportingConfigured()) {
+    return;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    printWifiStatusIfChanged();
     return;
   }
 
   const uint32_t now = millis();
   if (lastWifiAttemptMs != 0 && now - lastWifiAttemptMs < kWifiReconnectIntervalMs) {
+    printWifiStatusIfChanged();
     return;
   }
 
   lastWifiAttemptMs = now;
   Serial.printf("[%lu ms] wifi=connecting ssid=%s\n", now, kWifiSsid);
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleep(true);
   WiFi.begin(kWifiSsid, kWifiPassword);
+  printWifiStatusIfChanged(true);
 }
 
 float estimateDistanceMeters(int rssi, int8_t txPowerAt1m) {
@@ -213,7 +268,7 @@ void appendJsonString(String &payload, const char *value) {
   payload += '"';
 }
 
-String buildReportJson(uint32_t buttonClicks) {
+String buildReportJson(uint32_t buttonClicks, bool includeReading) {
   String payload;
   payload.reserve(520);
 
@@ -225,6 +280,12 @@ String buildReportJson(uint32_t buttonClicks) {
   payload += String(kReceiverLng, 7);
   payload += ",\"reported_at_ms\":";
   payload += String(millis());
+
+  if (!includeReading) {
+    payload += ",\"readings\":[]}";
+    return payload;
+  }
+
   payload += ",\"readings\":[{\"badge_id\":";
   appendJsonString(payload, kBadgeId);
   payload += ",\"badge_mac\":";
@@ -269,12 +330,14 @@ void sendHttpReport(bool force) {
   }
 
   const uint32_t now = millis();
-  if (lastSeenMs == 0 || now - lastSeenMs > kReadingStaleMs) {
+  const bool hasFreshReading = lastSeenMs != 0 && now - lastSeenMs <= kReadingStaleMs;
+  if (!hasFreshReading && now - lastReceiverHeartbeatMs < kReceiverHeartbeatIntervalMs) {
     return;
   }
 
   const uint32_t buttonClicks = pendingButtonClicks;
-  if (!force && buttonClicks == 0 && now - lastHttpReportMs < kHttpReportIntervalMs) {
+  if (hasFreshReading && !force && buttonClicks == 0 &&
+      now - lastHttpReportMs < kHttpReportIntervalMs) {
     return;
   }
 
@@ -291,7 +354,7 @@ void sendHttpReport(bool force) {
     return;
   }
 
-  const String payload = buildReportJson(buttonClicks);
+  const String payload = buildReportJson(buttonClicks, hasFreshReading);
   http.addHeader("Content-Type", "application/json");
   if (std::strlen(kHttpApiKey) > 0) {
     http.addHeader("X-API-Key", kHttpApiKey);
@@ -300,7 +363,11 @@ void sendHttpReport(bool force) {
   http.end();
 
   if (statusCode >= 200 && statusCode < 300) {
-    lastHttpReportMs = now;
+    if (hasFreshReading) {
+      lastHttpReportMs = now;
+    } else {
+      lastReceiverHeartbeatMs = now;
+    }
     if (buttonClicks > 0) {
       pendingButtonClicks -= buttonClicks;
     }

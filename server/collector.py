@@ -385,7 +385,17 @@ class PositionStore:
                 ORDER BY bp.badge_id
                 """
             ).fetchall()
-        return [dict(row) for row in rows]
+
+        now = datetime.now(timezone.utc)
+        positions = []
+        for row in rows:
+            item = dict(row)
+            calculated_at = parse_utc_iso(str(item["calculated_at"]))
+            age_seconds = max(0.0, (now - calculated_at).total_seconds())
+            item["age_seconds"] = age_seconds
+            item["stale"] = age_seconds > self.window_seconds
+            positions.append(item)
+        return positions
 
     def receivers(self) -> list[dict[str, Any]]:
         with self.connect() as connection:
@@ -430,6 +440,13 @@ class PositionStore:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_utc_iso(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def rssi_to_weight(rssi: int) -> float:
