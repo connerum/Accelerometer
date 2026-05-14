@@ -1,0 +1,22 @@
+[Unit]
+Description=ESP32 BLE Position Collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=blepos
+Group=blepos
+WorkingDirectory=/opt/ble-positioning/server
+EnvironmentFile=/etc/ble-positioning.env
+ExecStart=/usr/bin/python3 /opt/ble-positioning/server/collector.py --host 127.0.0.1 --port 8080 --db /var/lib/ble-positioning/ble_positions.sqlite3 --window-seconds 5
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ble-positioning
+
+[Install]
+WantedBy=multi-user.target
