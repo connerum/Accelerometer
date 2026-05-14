@@ -32,6 +32,15 @@ server/ble_positions.sqlite3
 If `COLLECTOR_API_KEY` or `--api-key` is set, every endpoint except `/health`
 requires `X-API-Key`.
 
+The dashboard is served from the collector:
+
+```text
+http://localhost:8080/
+```
+
+The page stores the API key in browser local storage and uses it only for API
+requests.
+
 ```sh
 curl http://localhost:8080/health
 curl -H 'X-API-Key: your-key' http://localhost:8080/receivers

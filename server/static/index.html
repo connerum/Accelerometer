@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>BLE Positioning Dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="topbar">
+        <div>
+          <p class="eyebrow">Live BLE positioning</p>
+          <h1>Device Dashboard</h1>
+        </div>
+        <div class="status-strip" aria-live="polite">
+          <span id="connectionStatus" class="status-pill status-muted">Disconnected</span>
+          <span id="lastRefresh" class="status-text">Not refreshed</span>
+        </div>
+      </section>
+
+      <section class="control-band" aria-label="Dashboard controls">
+        <label class="api-field">
+          <span>API key</span>
+          <input id="apiKeyInput" type="password" autocomplete="off" placeholder="X-API-Key">
+        </label>
+        <button id="saveKeyButton" class="button button-primary" type="button">Save</button>
+        <button id="refreshButton" class="button" type="button">Refresh</button>
+        <div class="segmented-control" role="group" aria-label="Device filter">
+          <button id="knownOnlyButton" class="segment" type="button">Known only</button>
+          <button id="allDevicesButton" class="segment active" type="button">All devices</button>
+        </div>
+      </section>
+
+      <section class="metrics-grid" aria-label="Dashboard metrics">
+        <article class="metric">
+          <span class="metric-label">Shown</span>
+          <strong id="shownCount">0</strong>
+        </article>
+        <article class="metric">
+          <span class="metric-label">Known</span>
+          <strong id="knownCount">0</strong>
+        </article>
+        <article class="metric">
+          <span class="metric-label">Unknown</span>
+          <strong id="unknownCount">0</strong>
+        </article>
+        <article class="metric">
+          <span class="metric-label">Fresh</span>
+          <strong id="freshCount">0</strong>
+        </article>
+        <article class="metric">
+          <span class="metric-label">Receivers</span>
+          <strong id="receiverCount">0</strong>
+        </article>
+      </section>
+
+      <section class="content-grid">
+        <div class="panel map-panel">
+          <div class="panel-header">
+            <h2>Position View</h2>
+            <span id="mapSummary" class="muted-text">No devices</span>
+          </div>
+          <div id="mapSurface" class="map-surface" aria-label="Position plot"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Add Known Device</h2>
+            <span id="deviceSaveStatus" class="muted-text"></span>
+          </div>
+          <form id="knownDeviceForm" class="device-form">
+            <label>
+              <span>MAC address</span>
+              <input id="deviceMacInput" required placeholder="45:C6:6A:F3:36:61">
+            </label>
+            <label>
+              <span>Label</span>
+              <input id="deviceLabelInput" required placeholder="Badge 001">
+            </label>
+            <label>
+              <span>Type</span>
+              <select id="deviceTypeInput">
+                <option value="tag">Tag</option>
+                <option value="badge">Badge</option>
+                <option value="phone">Phone</option>
+                <option value="asset">Asset</option>
+              </select>
+            </label>
+            <button class="button button-primary" type="submit">Save device</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Devices</h2>
+          <span id="deviceTableSummary" class="muted-text">0 devices</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Device</th>
+                <th>Status</th>
+                <th>Type</th>
+                <th>Confidence</th>
+                <th>Age</th>
+                <th>Location</th>
+                <th>Closest receiver</th>
+                <th>Receivers</th>
+                <th>Battery</th>
+              </tr>
+            </thead>
+            <tbody id="devicesTableBody"></tbody>
+          </table>
+        </div>
+        <div id="devicesEmptyState" class="empty-state hidden">No devices to display.</div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Receivers</h2>
+          <span id="receiverTableSummary" class="muted-text">0 receivers</span>
+        </div>
+        <div class="receiver-list" id="receiverList"></div>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

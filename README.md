@@ -57,6 +57,16 @@ curl http://YOUR_SERVER_IP:8080/positions
 curl 'http://YOUR_SERVER_IP:8080/readings?limit=20'
 ```
 
+The dashboard is hosted by the same backend:
+
+```text
+http://46.224.173.239/
+```
+
+It shows positions, receivers, known labels, unknown scanned devices, and a
+Known only / All devices toggle. Known labels are saved through the backend, so
+adding tags does not require ESP32 firmware changes.
+
 ## ESP32 Receiver Settings
 
 Each ESP32 needs a unique receiver ID and fixed GPS coordinates:

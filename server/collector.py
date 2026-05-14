@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 
 DEFAULT_DB_PATH = Path(__file__).with_name("ble_positions.sqlite3")
+STATIC_DIR = Path(__file__).with_name("static")
 DEFAULT_WINDOW_SECONDS = 5.0
 METERS_PER_DEGREE_LAT = 111_320.0
 
@@ -682,6 +683,21 @@ class CollectorHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path in ("", "/"):
+            self.write_static(STATIC_DIR / "index.html")
+            return
+
+        if parsed.path.startswith("/static/"):
+            static_root = STATIC_DIR.resolve()
+            static_path = (STATIC_DIR / parsed.path.removeprefix("/static/")).resolve()
+            try:
+                static_path.relative_to(static_root)
+            except ValueError:
+                self.write_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self.write_static(static_path)
+            return
+
         if parsed.path == "/health":
             self.write_json({"ok": True})
             return
@@ -756,6 +772,29 @@ class CollectorHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def write_static(self, path: Path) -> None:
+        if not path.exists() or not path.is_file():
+            self.write_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+
+        content_type = "application/octet-stream"
+        if path.suffix == ".html":
+            content_type = "text/html; charset=utf-8"
+        elif path.suffix == ".css":
+            content_type = "text/css; charset=utf-8"
+        elif path.suffix == ".js":
+            content_type = "application/javascript; charset=utf-8"
+        elif path.suffix == ".svg":
+            content_type = "image/svg+xml"
+
+        body = path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
