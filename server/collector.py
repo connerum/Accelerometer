@@ -35,9 +35,14 @@ CREATE TABLE IF NOT EXISTS receivers (
 
 CREATE TABLE IF NOT EXISTS badges (
     id TEXT PRIMARY KEY,
+    mac TEXT,
     label TEXT,
+    device_type TEXT NOT NULL DEFAULT 'unknown',
+    known INTEGER NOT NULL DEFAULT 0,
     battery_percent INTEGER,
-    last_seen_at TEXT NOT NULL
+    created_at TEXT,
+    updated_at TEXT,
+    last_seen_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS badge_readings (
@@ -100,6 +105,31 @@ class PositionStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            self._migrate_db(connection)
+
+    def _migrate_db(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(badges)").fetchall()
+        }
+        migrations = {
+            "mac": "ALTER TABLE badges ADD COLUMN mac TEXT",
+            "device_type": (
+                "ALTER TABLE badges ADD COLUMN device_type TEXT NOT NULL DEFAULT 'unknown'"
+            ),
+            "known": "ALTER TABLE badges ADD COLUMN known INTEGER NOT NULL DEFAULT 0",
+            "created_at": "ALTER TABLE badges ADD COLUMN created_at TEXT",
+            "updated_at": "ALTER TABLE badges ADD COLUMN updated_at TEXT",
+        }
+        for column, statement in migrations.items():
+            if column not in columns:
+                connection.execute(statement)
+
+        now = utc_now()
+        connection.execute(
+            "UPDATE badges SET created_at = COALESCE(created_at, ?), updated_at = COALESCE(updated_at, ?)",
+            (now, now),
+        )
 
     def origin(self, connection: sqlite3.Connection) -> tuple[float, float] | None:
         row = connection.execute(
@@ -182,20 +212,48 @@ class PositionStore:
                 if not isinstance(reading, dict):
                     raise ValueError("each reading must be an object")
 
-                badge_id = require_text(reading, "badge_id")
+                device_mac = normalize_mac(
+                    optional_text(reading.get("device_mac"))
+                    or optional_text(reading.get("badge_mac"))
+                )
+                badge_id = (
+                    device_id_for_mac(device_mac)
+                    if device_mac is not None
+                    else require_text(reading, "badge_id")
+                )
                 rssi = require_int(reading, "rssi")
                 battery_percent = optional_int(reading.get("battery_percent"))
 
                 connection.execute(
                     """
                     INSERT INTO badges (
-                        id, label, battery_percent, last_seen_at
-                    ) VALUES (?, ?, ?, ?)
+                        id,
+                        mac,
+                        label,
+                        device_type,
+                        known,
+                        battery_percent,
+                        created_at,
+                        updated_at,
+                        last_seen_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
+                        mac = COALESCE(excluded.mac, badges.mac),
                         battery_percent = COALESCE(excluded.battery_percent, badges.battery_percent),
+                        updated_at = excluded.updated_at,
                         last_seen_at = excluded.last_seen_at
                     """,
-                    (badge_id, badge_id, battery_percent, now),
+                    (
+                        badge_id,
+                        device_mac,
+                        badge_id,
+                        "unknown",
+                        0,
+                        battery_percent,
+                        now,
+                        now,
+                        now,
+                    ),
                 )
 
                 connection.execute(
@@ -220,7 +278,7 @@ class PositionStore:
                     """,
                     (
                         badge_id,
-                        optional_text(reading.get("badge_mac")),
+                        device_mac,
                         receiver_id,
                         rssi,
                         receiver_lat,
@@ -373,8 +431,14 @@ class PositionStore:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT bp.*
+                SELECT
+                    bp.*,
+                    b.mac AS device_mac,
+                    b.label AS label,
+                    b.device_type AS device_type,
+                    b.known AS known
                 FROM badge_positions bp
+                LEFT JOIN badges b ON b.id = bp.badge_id
                 INNER JOIN (
                     SELECT badge_id, MAX(calculated_at) AS latest_calculated_at
                     FROM badge_positions
@@ -394,6 +458,7 @@ class PositionStore:
             age_seconds = max(0.0, (now - calculated_at).total_seconds())
             item["age_seconds"] = age_seconds
             item["stale"] = age_seconds > self.window_seconds
+            item["known"] = bool(item.get("known", False))
             positions.append(item)
         return positions
 
@@ -414,17 +479,21 @@ class PositionStore:
             rows = connection.execute(
                 """
                 SELECT
-                    id,
-                    badge_id,
-                    badge_mac,
-                    receiver_id,
-                    rssi,
-                    battery_percent,
-                    movement,
-                    button_clicks,
-                    received_at
-                FROM badge_readings
-                ORDER BY id DESC
+                    br.id,
+                    br.badge_id,
+                    br.badge_mac,
+                    br.receiver_id,
+                    br.rssi,
+                    br.battery_percent,
+                    br.movement,
+                    br.button_clicks,
+                    br.received_at,
+                    b.label,
+                    b.device_type,
+                    b.known
+                FROM badge_readings br
+                LEFT JOIN badges b ON b.id = br.badge_id
+                ORDER BY br.id DESC
                 LIMIT ?
                 """,
                 (limit,),
@@ -434,8 +503,88 @@ class PositionStore:
         for row in rows:
             item = dict(row)
             item["movement"] = bool(item["movement"])
+            item["known"] = bool(item.get("known", False))
             readings.append(item)
         return readings
+
+    def devices(self, include_unknown: bool = True) -> list[dict[str, Any]]:
+        where = "" if include_unknown else "WHERE known = 1"
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    id,
+                    mac,
+                    label,
+                    device_type,
+                    known,
+                    battery_percent,
+                    created_at,
+                    updated_at,
+                    last_seen_at
+                FROM badges
+                {where}
+                ORDER BY known DESC, label COLLATE NOCASE, id
+                """
+            ).fetchall()
+
+        devices = []
+        for row in rows:
+            item = dict(row)
+            item["known"] = bool(item["known"])
+            devices.append(item)
+        return devices
+
+    def upsert_known_device(self, payload: dict[str, Any]) -> dict[str, Any]:
+        mac = normalize_mac(require_text(payload, "mac"))
+        if mac is None:
+            raise ValueError("invalid mac")
+        now = utc_now()
+        device_id = optional_text(payload.get("id")) or device_id_for_mac(mac)
+        label = optional_text(payload.get("label")) or device_id
+        device_type = optional_text(payload.get("device_type")) or "tag"
+
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT id FROM badges WHERE lower(mac) = ? OR id = ? LIMIT 1",
+                (mac, device_id),
+            ).fetchone()
+            if existing is not None:
+                device_id = str(existing["id"])
+
+            connection.execute(
+                """
+                INSERT INTO badges (
+                    id,
+                    mac,
+                    label,
+                    device_type,
+                    known,
+                    created_at,
+                    updated_at,
+                    last_seen_at
+                ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    mac = excluded.mac,
+                    label = excluded.label,
+                    device_type = excluded.device_type,
+                    known = 1,
+                    updated_at = excluded.updated_at,
+                    last_seen_at = COALESCE(badges.last_seen_at, excluded.last_seen_at)
+                """,
+                (device_id, mac, label, device_type, now, now, now),
+            )
+
+        return {
+            "ok": True,
+            "device": {
+                "id": device_id,
+                "mac": mac,
+                "label": label,
+                "device_type": device_type,
+                "known": True,
+            },
+        }
 
 
 def utc_now() -> str:
@@ -486,6 +635,24 @@ def optional_text(value: Any) -> str | None:
     return text or None
 
 
+def normalize_mac(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = value.strip().lower().replace("-", ":")
+    compact = text.replace(":", "")
+    if len(compact) != 12:
+        return None
+    try:
+        int(compact, 16)
+    except ValueError:
+        return None
+    return ":".join(compact[index : index + 2] for index in range(0, 12, 2))
+
+
+def device_id_for_mac(mac: str) -> str:
+    return f"ble:{mac}"
+
+
 def require_float(payload: dict[str, Any], field: str) -> float:
     value = payload.get(field)
     if value is None:
@@ -531,6 +698,12 @@ class CollectorHandler(BaseHTTPRequestHandler):
             self.write_json({"receivers": self.store.receivers()})
             return
 
+        if parsed.path == "/devices":
+            query = parse_qs(parsed.query)
+            include_unknown = query.get("include_unknown", ["1"])[0] not in ("0", "false", "False")
+            self.write_json({"devices": self.store.devices(include_unknown)})
+            return
+
         if parsed.path in ("/readings", "/reports"):
             query = parse_qs(parsed.query)
             limit = optional_int(query.get("limit", ["100"])[0]) or 100
@@ -540,7 +713,8 @@ class CollectorHandler(BaseHTTPRequestHandler):
         self.write_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        if urlparse(self.path).path != "/report":
+        parsed_path = urlparse(self.path).path
+        if parsed_path not in ("/report", "/devices"):
             self.write_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
             return
 
@@ -552,7 +726,10 @@ class CollectorHandler(BaseHTTPRequestHandler):
             payload = self.read_json_body()
             if not isinstance(payload, dict):
                 raise ValueError("request body must be a JSON object")
-            response = self.store.insert_payload(payload)
+            if parsed_path == "/devices":
+                response = self.store.upsert_known_device(payload)
+            else:
+                response = self.store.insert_payload(payload)
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError) as exc:
             self.write_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return

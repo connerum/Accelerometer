@@ -2,8 +2,8 @@
 
 This project follows the simple recommended architecture:
 
-1. BLE badge advertises.
-2. Three fixed ESP32 receivers scan for the badge.
+1. BLE devices advertise.
+2. Three fixed ESP32 receivers scan nearby BLE advertisers.
 3. Each ESP32 reports RSSI readings to an HTTP backend.
 4. The backend stores data in SQLite and estimates badge position with a
    smoothed weighted centroid.
@@ -72,8 +72,6 @@ build_flags =
   -D RECEIVER_ID=\"north_gate\"
   -D RECEIVER_LAT=34.012345
   -D RECEIVER_LNG=-86.012345
-  -D BADGE_ID=\"badge_001\"
-  -D TARGET_BADGE_MAC=\"e0:15:6b:37:a2:02\"
 ```
 
 ```ini
@@ -96,20 +94,18 @@ The ESP32 posts to `POST /report`:
 
 ```json
 {
-  "protocol_version": 1,
+  "protocol_version": 2,
   "receiver_id": "north_gate",
   "receiver_lat": 34.012345,
   "receiver_lng": -86.012345,
   "reported_at_ms": 12345,
   "readings": [
     {
-      "badge_id": "badge_001",
-      "badge_mac": "e0:15:6b:37:a2:02",
+      "device_id": "ble:45:c6:6a:f3:36:61",
+      "device_mac": "45:c6:6a:f3:36:61",
       "seen_at_ms": 12001,
       "rssi": -67,
       "movement": true,
-      "speed_mps": 0.32,
-      "distance_m": 2.1,
       "battery_percent": 97,
       "tx_power_at_1m": -58,
       "button_clicks": 0
@@ -133,3 +129,33 @@ centroid. Confidence is based on how many receivers saw the badge recently:
 The next practical step is field calibration: place the badge at known points,
 record RSSI from all receivers, and tune receiver placement plus the confidence
 radius.
+
+## Known Devices
+
+ESP32 receivers do not need to know which devices are known tags. They report
+nearby BLE MAC addresses, and the server labels known devices.
+
+Add or update a known tag:
+
+```sh
+curl -X POST http://46.224.173.239/devices \
+  -H 'X-API-Key: YOUR_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "mac": "45:C6:6A:F3:36:61",
+    "label": "Gate Badge",
+    "device_type": "tag"
+  }'
+```
+
+List known and unknown scanned devices:
+
+```sh
+curl -H 'X-API-Key: YOUR_API_KEY' http://46.224.173.239/devices
+```
+
+List only known devices:
+
+```sh
+curl -H 'X-API-Key: YOUR_API_KEY' 'http://46.224.173.239/devices?include_unknown=0'
+```

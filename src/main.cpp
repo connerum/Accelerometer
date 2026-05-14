@@ -47,16 +47,6 @@ namespace {
 #define RECEIVER_LNG 0.0
 #endif
 
-#ifndef BADGE_ID
-#define BADGE_ID "badge_001"
-#endif
-
-#ifndef TARGET_BADGE_MAC
-#define TARGET_BADGE_MAC "45:C6:6A:F3:36:61"
-#endif
-
-constexpr char kTargetMac[] = TARGET_BADGE_MAC;
-constexpr char kBadgeId[] = BADGE_ID;
 constexpr char kReceiverId[] = RECEIVER_ID;
 constexpr char kWifiSsid[] = WIFI_SSID;
 constexpr char kWifiPassword[] = WIFI_PASSWORD;
@@ -74,14 +64,34 @@ constexpr uint16_t kHttpTimeoutMs = 1500;
 constexpr uint32_t kMovementHoldMs = 1200;
 constexpr uint32_t kButtonRepeatGuardMs = 700;
 constexpr uint32_t kReadingStaleMs = 5000;
+constexpr uint32_t kSeenPrintIntervalMs = 5000;
+constexpr size_t kMaxTrackedDevices = 48;
+constexpr size_t kMaxReadingsPerReport = 32;
 constexpr float kPathLossExponent = 2.0f;
 constexpr float kSpeedFilterAlpha = 0.35f;
+
+struct BleReading {
+  bool active = false;
+  char mac[18] = "";
+  uint32_t seenMs = 0;
+  uint32_t lastPrintMs = 0;
+  int rssi = -127;
+  bool movement = false;
+  bool hasMovement = false;
+  uint32_t lastMovementMs = 0;
+  bool hasBattery = false;
+  uint8_t batteryPercent = 0;
+  bool hasTxPowerAt1m = false;
+  int8_t txPowerAt1m = -58;
+  uint32_t buttonClicks = 0;
+};
 
 BLEScan *scan = nullptr;
 uint32_t lastWifiAttemptMs = 0;
 uint32_t lastWifiStatusPrintMs = 0;
 uint32_t lastHttpReportMs = 0;
 uint32_t lastReceiverHeartbeatMs = 0;
+BleReading readings[kMaxTrackedDevices];
 uint32_t lastSeenMs = 0;
 int lastRssi = -127;
 bool lastMovement = false;
@@ -118,6 +128,50 @@ bool equalsIgnoreCase(const std::string &left, const char *right) {
   }
 
   return true;
+}
+
+void copyLowerMac(char *destination, const std::string &source) {
+  const size_t maxLength = 17;
+  const size_t length = source.length() < maxLength ? source.length() : maxLength;
+  for (size_t i = 0; i < length; ++i) {
+    destination[i] = lowerAscii(source[i]);
+  }
+  destination[length] = '\0';
+}
+
+BleReading *findOrCreateReading(const std::string &address) {
+  char normalizedMac[18];
+  copyLowerMac(normalizedMac, address);
+
+  BleReading *oldest = &readings[0];
+  for (auto &reading : readings) {
+    if (reading.active && std::strcmp(reading.mac, normalizedMac) == 0) {
+      return &reading;
+    }
+    if (!reading.active) {
+      oldest = &reading;
+      break;
+    }
+    if (reading.seenMs < oldest->seenMs) {
+      oldest = &reading;
+    }
+  }
+
+  *oldest = BleReading{};
+  oldest->active = true;
+  std::strncpy(oldest->mac, normalizedMac, sizeof(oldest->mac) - 1);
+  oldest->mac[sizeof(oldest->mac) - 1] = '\0';
+  return oldest;
+}
+
+size_t freshReadingCount(uint32_t now) {
+  size_t count = 0;
+  for (const auto &reading : readings) {
+    if (reading.active && now - reading.seenMs <= kReadingStaleMs) {
+      ++count;
+    }
+  }
+  return count;
 }
 
 const char *wifiStatusName(wl_status_t status) {
@@ -214,8 +268,9 @@ float updateEstimatedSpeed(uint32_t now, int rssi) {
   return filteredSpeedMps;
 }
 
-bool movementIsActive(uint32_t now) {
-  return hasMovement && lastMovement && now - lastMovementMs <= kMovementHoldMs;
+bool movementIsActive(const BleReading &reading, uint32_t now) {
+  return reading.hasMovement && reading.movement &&
+         now - reading.lastMovementMs <= kMovementHoldMs;
 }
 
 bool isHolyIotService(BLEAdvertisedDevice &device, int index) {
@@ -225,7 +280,7 @@ bool isHolyIotService(BLEAdvertisedDevice &device, int index) {
          native->uuid.uuid16 == kHolyIotServiceUuid;
 }
 
-void readIBeaconTxPowerIfPresent(BLEAdvertisedDevice &device) {
+void readIBeaconTxPowerIfPresent(BLEAdvertisedDevice &device, BleReading &reading) {
   if (!device.haveManufacturerData()) {
     return;
   }
@@ -240,11 +295,12 @@ void readIBeaconTxPowerIfPresent(BLEAdvertisedDevice &device) {
     return;
   }
 
-  lastTxPowerAt1m = static_cast<int8_t>(data[24]);
-  hasTxPowerAt1m = true;
+  reading.txPowerAt1m = static_cast<int8_t>(data[24]);
+  reading.hasTxPowerAt1m = true;
 }
 
-void decodeHolyIotServiceData(const std::string &serviceData, uint32_t now) {
+void decodeHolyIotServiceData(BleReading &reading, const std::string &serviceData,
+                              uint32_t now) {
   const auto *data = reinterpret_cast<const uint8_t *>(serviceData.data());
   const size_t length = serviceData.length();
 
@@ -255,22 +311,23 @@ void decodeHolyIotServiceData(const std::string &serviceData, uint32_t now) {
     return;
   }
 
-  lastBatteryPercent = data[1];
-  hasBattery = true;
+  reading.batteryPercent = data[1];
+  reading.hasBattery = true;
   const uint8_t measurementType = data[10];
 
   switch (measurementType) {
   case 4:
-    hasMovement = true;
-    lastMovement = data[11] != 0;
-    lastMovementMs = lastMovement ? now : 0;
+    reading.hasMovement = true;
+    reading.movement = data[11] != 0;
+    reading.lastMovementMs = reading.movement ? now : 0;
     break;
   case 6:
     if (data[11] == 1 &&
         (lastButtonClickMs == 0 || now - lastButtonClickMs >= kButtonRepeatGuardMs)) {
       lastButtonClickMs = now;
+      ++reading.buttonClicks;
       ++pendingButtonClicks;
-      Serial.printf("[%lu ms] button=click\n", now);
+      Serial.printf("[%lu ms] button=click mac=%s\n", now, reading.mac);
     }
     break;
   }
@@ -289,9 +346,10 @@ void appendJsonString(String &payload, const char *value) {
 
 String buildReportJson(uint32_t buttonClicks, bool includeReading) {
   String payload;
-  payload.reserve(520);
+  payload.reserve(4096);
+  const uint32_t now = millis();
 
-  payload += "{\"protocol_version\":1,\"receiver_id\":";
+  payload += "{\"protocol_version\":2,\"receiver_id\":";
   appendJsonString(payload, kReceiverId);
   payload += ",\"receiver_lat\":";
   payload += String(kReceiverLat, 7);
@@ -305,35 +363,52 @@ String buildReportJson(uint32_t buttonClicks, bool includeReading) {
     return payload;
   }
 
-  payload += ",\"readings\":[{\"badge_id\":";
-  appendJsonString(payload, kBadgeId);
-  payload += ",\"badge_mac\":";
-  appendJsonString(payload, kTargetMac);
-  payload += ",\"seen_at_ms\":";
-  payload += String(lastSeenMs);
-  payload += ",\"rssi\":";
-  payload += String(lastRssi);
-  payload += ",\"movement\":";
-  payload += movementIsActive(millis()) ? "true" : "false";
-  payload += ",\"speed_mps\":";
-  payload += String(lastSpeedMps, 3);
-  payload += ",\"distance_m\":";
-  if (std::isnan(lastDistanceM)) {
-    payload += "null";
-  } else {
-    payload += String(lastDistanceM, 3);
+  payload += ",\"readings\":[";
+  size_t appended = 0;
+  for (const auto &reading : readings) {
+    if (!reading.active || now - reading.seenMs > kReadingStaleMs) {
+      continue;
+    }
+    if (appended >= kMaxReadingsPerReport) {
+      break;
+    }
+
+    if (appended > 0) {
+      payload += ',';
+    }
+
+    payload += "{\"device_id\":\"ble:";
+    payload += reading.mac;
+    payload += "\",\"device_mac\":";
+    appendJsonString(payload, reading.mac);
+    payload += ",\"badge_id\":\"ble:";
+    payload += reading.mac;
+    payload += "\",\"badge_mac\":";
+    appendJsonString(payload, reading.mac);
+    payload += ",\"seen_at_ms\":";
+    payload += String(reading.seenMs);
+    payload += ",\"rssi\":";
+    payload += String(reading.rssi);
+    payload += ",\"movement\":";
+    payload += movementIsActive(reading, now) ? "true" : "false";
+    payload += ",\"battery_percent\":";
+    if (reading.hasBattery) {
+      payload += String(reading.batteryPercent);
+    } else {
+      payload += "null";
+    }
+    payload += ",\"tx_power_at_1m\":";
+    if (reading.hasTxPowerAt1m) {
+      payload += String(reading.txPowerAt1m);
+    } else {
+      payload += "null";
+    }
+    payload += ",\"button_clicks\":";
+    payload += String(reading.buttonClicks);
+    payload += "}";
+    ++appended;
   }
-  payload += ",\"battery_percent\":";
-  if (hasBattery) {
-    payload += String(lastBatteryPercent);
-  } else {
-    payload += "null";
-  }
-  payload += ",\"tx_power_at_1m\":";
-  payload += String(lastTxPowerAt1m);
-  payload += ",\"button_clicks\":";
-  payload += String(buttonClicks);
-  payload += "}]}";
+  payload += "]}";
 
   return payload;
 }
@@ -349,7 +424,7 @@ void sendHttpReport(bool force) {
   }
 
   const uint32_t now = millis();
-  const bool hasFreshReading = lastSeenMs != 0 && now - lastSeenMs <= kReadingStaleMs;
+  const bool hasFreshReading = freshReadingCount(now) > 0;
   if (!hasFreshReading && now - lastReceiverHeartbeatMs < kReceiverHeartbeatIntervalMs) {
     return;
   }
@@ -360,10 +435,10 @@ void sendHttpReport(bool force) {
     return;
   }
 
-  if (!movementIsActive(now)) {
-    lastMovement = false;
-    filteredSpeedMps = 0.0f;
-    lastSpeedMps = 0.0f;
+  for (auto &reading : readings) {
+    if (reading.active && !movementIsActive(reading, now)) {
+      reading.movement = false;
+    }
   }
 
   HTTPClient http;
@@ -389,6 +464,9 @@ void sendHttpReport(bool force) {
     }
     if (buttonClicks > 0) {
       pendingButtonClicks -= buttonClicks;
+      for (auto &reading : readings) {
+        reading.buttonClicks = 0;
+      }
     }
     Serial.printf("[%lu ms] http=reported status=%d\n", now, statusCode);
   } else {
@@ -400,30 +478,28 @@ class TargetCallbacks final : public BLEAdvertisedDeviceCallbacks {
 public:
   void onResult(BLEAdvertisedDevice device) override {
     const std::string address = device.getAddress().toString();
-    if (!equalsIgnoreCase(address, kTargetMac)) {
+    BleReading *reading = findOrCreateReading(address);
+    if (reading == nullptr) {
       return;
     }
 
     const uint32_t now = millis();
+    reading->seenMs = now;
+    reading->rssi = device.getRSSI();
     lastSeenMs = now;
-    lastRssi = device.getRSSI();
-    Serial.printf("[%lu ms] badge=seen mac=%s rssi=%d\n", now, address.c_str(), lastRssi);
-    readIBeaconTxPowerIfPresent(device);
+    lastRssi = reading->rssi;
+    if (now - reading->lastPrintMs >= kSeenPrintIntervalMs) {
+      reading->lastPrintMs = now;
+      Serial.printf("[%lu ms] ble=seen mac=%s rssi=%d\n", now, reading->mac,
+                    reading->rssi);
+    }
+    readIBeaconTxPowerIfPresent(device, *reading);
 
     for (int i = 0; i < device.getServiceDataCount(); ++i) {
       if (isHolyIotService(device, i)) {
-        decodeHolyIotServiceData(device.getServiceData(i), now);
+        decodeHolyIotServiceData(*reading, device.getServiceData(i), now);
       }
     }
-
-    float speedMps = updateEstimatedSpeed(now, lastRssi);
-    if (!movementIsActive(now)) {
-      lastMovement = false;
-      speedMps = 0.0f;
-      filteredSpeedMps = 0.0f;
-    }
-    lastSpeedMps = speedMps;
-    Serial.printf("[%lu ms] speed=%.2f m/s\n", now, speedMps);
   }
 };
 
@@ -438,17 +514,8 @@ void printLiveStatus() {
 
   lastStatusPrintMs = now;
 
-  if (lastSeenMs == 0) {
-    Serial.printf("[%lu ms] speed=0.00 m/s\n", now);
-    return;
-  }
-
-  if (!movementIsActive(now)) {
-    lastMovement = false;
-    filteredSpeedMps = 0.0f;
-  }
-  lastSpeedMps = filteredSpeedMps;
-  Serial.printf("[%lu ms] speed=%.2f m/s\n", now, filteredSpeedMps);
+  Serial.printf("[%lu ms] ble=fresh_devices count=%u\n", now,
+                static_cast<unsigned>(freshReadingCount(now)));
 }
 
 } // namespace
