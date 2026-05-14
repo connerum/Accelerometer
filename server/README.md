@@ -67,6 +67,50 @@ curl -X POST http://localhost:8080/devices \
 Unknown scanned devices are created automatically with `known: false`. The
 `/devices?include_unknown=0` endpoint returns only labeled known devices.
 
+Delete a known label:
+
+```sh
+curl -X DELETE http://localhost:8080/devices/ble%3A45%3Ac6%3A6a%3Af3%3A36%3A61 \
+  -H 'X-API-Key: your-key'
+```
+
+This keeps scan history and turns the device back into an unknown scanned
+device.
+
+## Manage Receivers
+
+Receiver IDs still come from ESP32 firmware. Renaming a receiver stores a
+server-side display label so the ESP32 does not need to be reflashed.
+
+```sh
+curl -X PATCH http://localhost:8080/receivers/north_gate \
+  -H 'X-API-Key: your-key' \
+  -H 'Content-Type: application/json' \
+  -d '{"label": "North Gate Receiver"}'
+```
+
+Move a receiver to a saved map coordinate:
+
+```sh
+curl -X PATCH http://localhost:8080/receivers/north_gate \
+  -H 'X-API-Key: your-key' \
+  -H 'Content-Type: application/json' \
+  -d '{"latitude": 33.905150, "longitude": -86.053748}'
+```
+
+Manual receiver coordinates are saved on the server. Later ESP32 reports update
+the heartbeat time but do not overwrite the saved map coordinate.
+
+Delete a receiver:
+
+```sh
+curl -X DELETE http://localhost:8080/receivers/north_gate \
+  -H 'X-API-Key: your-key'
+```
+
+If that ESP32 keeps reporting with the same `receiver_id`, the receiver will be
+created again automatically.
+
 ## Test Report
 
 ```sh

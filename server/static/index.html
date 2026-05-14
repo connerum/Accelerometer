@@ -4,6 +4,10 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>BLE Positioning Dashboard</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    >
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body>
@@ -59,9 +63,12 @@
         <div class="panel map-panel">
           <div class="panel-header">
             <h2>Position View</h2>
-            <span id="mapSummary" class="muted-text">No devices</span>
+            <span class="header-status">
+              <span id="mapActionStatus" class="muted-text"></span>
+              <span id="mapSummary" class="muted-text">No devices</span>
+            </span>
           </div>
-          <div id="mapSurface" class="map-surface" aria-label="Position plot"></div>
+          <div id="mapSurface" class="map-surface" aria-label="Satellite position map"></div>
         </div>
 
         <div class="panel">
@@ -95,7 +102,10 @@
       <section class="panel">
         <div class="panel-header">
           <h2>Devices</h2>
-          <span id="deviceTableSummary" class="muted-text">0 devices</span>
+          <span class="header-status">
+            <span id="deviceActionStatus" class="muted-text"></span>
+            <span id="deviceTableSummary" class="muted-text">0 devices</span>
+          </span>
         </div>
         <div class="table-wrap">
           <table>
@@ -110,6 +120,7 @@
                 <th>Closest receiver</th>
                 <th>Receivers</th>
                 <th>Battery</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody id="devicesTableBody"></tbody>
@@ -121,11 +132,15 @@
       <section class="panel">
         <div class="panel-header">
           <h2>Receivers</h2>
-          <span id="receiverTableSummary" class="muted-text">0 receivers</span>
+          <span class="header-status">
+            <span id="receiverActionStatus" class="muted-text"></span>
+            <span id="receiverTableSummary" class="muted-text">0 receivers</span>
+          </span>
         </div>
         <div class="receiver-list" id="receiverList"></div>
       </section>
     </main>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="/static/app.js"></script>
   </body>
 </html>

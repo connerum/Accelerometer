@@ -169,3 +169,40 @@ List only known devices:
 ```sh
 curl -H 'X-API-Key: YOUR_API_KEY' 'http://46.224.173.239/devices?include_unknown=0'
 ```
+
+Delete a known label:
+
+```sh
+curl -X DELETE 'http://46.224.173.239/devices/ble%3A45%3Ac6%3A6a%3Af3%3A36%3A61' \
+  -H 'X-API-Key: YOUR_API_KEY'
+```
+
+Rename a receiver display label:
+
+```sh
+curl -X PATCH http://46.224.173.239/receivers/north_gate \
+  -H 'X-API-Key: YOUR_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"label": "North Gate Receiver"}'
+```
+
+Move a receiver to a saved map coordinate:
+
+```sh
+curl -X PATCH http://46.224.173.239/receivers/north_gate \
+  -H 'X-API-Key: YOUR_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"latitude": 33.905150, "longitude": -86.053748}'
+```
+
+Delete a receiver:
+
+```sh
+curl -X DELETE http://46.224.173.239/receivers/north_gate \
+  -H 'X-API-Key: YOUR_API_KEY'
+```
+
+Receiver rename/delete is server-side. If an ESP32 keeps reporting with the
+same `RECEIVER_ID`, a deleted receiver will reappear automatically.
+Receiver map coordinates are also server-side and will not be overwritten by
+later ESP32 heartbeat reports.

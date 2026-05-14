@@ -14,7 +14,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 DEFAULT_DB_PATH = Path(__file__).with_name("ble_positions.sqlite3")
@@ -26,10 +26,12 @@ METERS_PER_DEGREE_LAT = 111_320.0
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS receivers (
     id TEXT PRIMARY KEY,
+    label TEXT,
     latitude REAL NOT NULL,
     longitude REAL NOT NULL,
     x REAL NOT NULL,
     y REAL NOT NULL,
+    manual_position INTEGER NOT NULL DEFAULT 0,
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL
 );
@@ -109,6 +111,18 @@ class PositionStore:
             self._migrate_db(connection)
 
     def _migrate_db(self, connection: sqlite3.Connection) -> None:
+        receiver_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(receivers)").fetchall()
+        }
+        if "label" not in receiver_columns:
+            connection.execute("ALTER TABLE receivers ADD COLUMN label TEXT")
+        if "manual_position" not in receiver_columns:
+            connection.execute(
+                "ALTER TABLE receivers ADD COLUMN manual_position INTEGER NOT NULL DEFAULT 0"
+            )
+        connection.execute("UPDATE receivers SET label = COALESCE(label, id)")
+
         columns = {
             row["name"]
             for row in connection.execute("PRAGMA table_info(badges)").fetchall()
@@ -139,6 +153,25 @@ class PositionStore:
         if row is None:
             return None
         return float(row["latitude"]), float(row["longitude"])
+
+    def recalculate_receiver_xy(self, connection: sqlite3.Connection) -> None:
+        origin = self.origin(connection)
+        if origin is None:
+            return
+        rows = connection.execute(
+            "SELECT id, latitude, longitude FROM receivers"
+        ).fetchall()
+        for row in rows:
+            x, y = self.xy_from_lat_lng(
+                float(row["latitude"]),
+                float(row["longitude"]),
+                origin[0],
+                origin[1],
+            )
+            connection.execute(
+                "UPDATE receivers SET x = ?, y = ? WHERE id = ?",
+                (x, y, str(row["id"])),
+            )
 
     def xy_from_lat_lng(
         self,
@@ -171,7 +204,19 @@ class PositionStore:
         latitude: float,
         longitude: float,
         now: str,
-    ) -> tuple[float, float]:
+    ) -> tuple[float, float, float, float]:
+        existing = connection.execute(
+            """
+            SELECT latitude, longitude, manual_position
+            FROM receivers
+            WHERE id = ?
+            """,
+            (receiver_id,),
+        ).fetchone()
+        if existing is not None and bool(existing["manual_position"]):
+            latitude = float(existing["latitude"])
+            longitude = float(existing["longitude"])
+
         existing_origin = self.origin(connection)
         origin_lat, origin_lng = existing_origin or (latitude, longitude)
         x, y = self.xy_from_lat_lng(latitude, longitude, origin_lat, origin_lng)
@@ -179,18 +224,33 @@ class PositionStore:
         connection.execute(
             """
             INSERT INTO receivers (
-                id, latitude, longitude, x, y, first_seen_at, last_seen_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                id, label, latitude, longitude, x, y, manual_position, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
+                label = COALESCE(receivers.label, excluded.label),
                 latitude = excluded.latitude,
                 longitude = excluded.longitude,
                 x = excluded.x,
                 y = excluded.y,
                 last_seen_at = excluded.last_seen_at
             """,
-            (receiver_id, latitude, longitude, x, y, now, now),
+            (receiver_id, receiver_id, latitude, longitude, x, y, now, now),
         )
-        return x, y
+        self.recalculate_receiver_xy(connection)
+        row = connection.execute(
+            """
+            SELECT latitude, longitude, x, y
+            FROM receivers
+            WHERE id = ?
+            """,
+            (receiver_id,),
+        ).fetchone()
+        return (
+            float(row["x"]),
+            float(row["y"]),
+            float(row["latitude"]),
+            float(row["longitude"]),
+        )
 
     def insert_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         receiver_id = require_text(payload, "receiver_id")
@@ -205,7 +265,7 @@ class PositionStore:
         updated_badges: set[str] = set()
 
         with self.connect() as connection:
-            receiver_x, receiver_y = self.upsert_receiver(
+            receiver_x, receiver_y, receiver_lat, receiver_lng = self.upsert_receiver(
                 connection, receiver_id, receiver_lat, receiver_lng, now
             )
 
@@ -467,12 +527,17 @@ class PositionStore:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, latitude, longitude, x, y, first_seen_at, last_seen_at
+                SELECT id, label, latitude, longitude, x, y, manual_position, first_seen_at, last_seen_at
                 FROM receivers
                 ORDER BY id
                 """
             ).fetchall()
-        return [dict(row) for row in rows]
+        receivers = []
+        for row in rows:
+            item = dict(row)
+            item["manual_position"] = bool(item["manual_position"])
+            receivers.append(item)
+        return receivers
 
     def recent_readings(self, limit: int) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 500))
@@ -587,6 +652,114 @@ class PositionStore:
             },
         }
 
+    def update_receiver(self, receiver_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        label = optional_text(payload.get("label"))
+        has_lat = payload.get("latitude") is not None
+        has_lng = payload.get("longitude") is not None
+        if label is None and not (has_lat or has_lng):
+            raise ValueError("provide label or latitude and longitude")
+        if label is not None and len(label) > 80:
+            raise ValueError("label must be 80 characters or fewer")
+        if has_lat != has_lng:
+            raise ValueError("latitude and longitude must be provided together")
+
+        with self.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT id, label, latitude, longitude
+                FROM receivers
+                WHERE id = ?
+                """,
+                (receiver_id,),
+            ).fetchone()
+            if existing is None:
+                raise NotFoundError("receiver not found")
+
+            next_label = label if label is not None else str(existing["label"])
+            latitude = float(existing["latitude"])
+            longitude = float(existing["longitude"])
+            manual_position = False
+            if has_lat and has_lng:
+                latitude = require_latitude(payload, "latitude")
+                longitude = require_longitude(payload, "longitude")
+                manual_position = True
+
+            origin = self.origin(connection) or (latitude, longitude)
+            x, y = self.xy_from_lat_lng(latitude, longitude, origin[0], origin[1])
+            connection.execute(
+                """
+                UPDATE receivers
+                SET
+                    label = ?,
+                    latitude = ?,
+                    longitude = ?,
+                    x = ?,
+                    y = ?,
+                    manual_position = CASE WHEN ? THEN 1 ELSE manual_position END
+                WHERE id = ?
+                """,
+                (next_label, latitude, longitude, x, y, int(manual_position), receiver_id),
+            )
+            self.recalculate_receiver_xy(connection)
+            row = connection.execute(
+                """
+                SELECT id, label, latitude, longitude, x, y, manual_position, first_seen_at, last_seen_at
+                FROM receivers
+                WHERE id = ?
+                """,
+                (receiver_id,),
+            ).fetchone()
+
+        receiver = dict(row)
+        receiver["manual_position"] = bool(receiver["manual_position"])
+        return {"ok": True, "receiver": receiver}
+
+    def delete_receiver(self, receiver_id: str) -> dict[str, Any]:
+        with self.connect() as connection:
+            cursor = connection.execute("DELETE FROM receivers WHERE id = ?", (receiver_id,))
+            if cursor.rowcount == 0:
+                raise NotFoundError("receiver not found")
+            self.recalculate_receiver_xy(connection)
+        return {"ok": True, "deleted_receiver_id": receiver_id}
+
+    def delete_known_device(self, device_ref: str) -> dict[str, Any]:
+        device_id, mac = device_lookup_values(device_ref)
+        now = utc_now()
+
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id
+                FROM badges
+                WHERE known = 1
+                  AND (id = ? OR lower(mac) = ?)
+                LIMIT 1
+                """,
+                (device_id, mac),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("known device not found")
+
+            deleted_id = str(row["id"])
+            connection.execute(
+                """
+                UPDATE badges
+                SET
+                    label = id,
+                    device_type = 'unknown',
+                    known = 0,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (now, deleted_id),
+            )
+
+        return {"ok": True, "deleted_device_id": deleted_id}
+
+
+class NotFoundError(ValueError):
+    pass
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -654,11 +827,41 @@ def device_id_for_mac(mac: str) -> str:
     return f"ble:{mac}"
 
 
+def device_lookup_values(device_ref: str) -> tuple[str, str | None]:
+    mac = normalize_mac(device_ref)
+    if mac is not None:
+        return device_id_for_mac(mac), mac
+    return device_ref, None
+
+
+def path_tail(path: str, prefix: str) -> str | None:
+    if not path.startswith(prefix):
+        return None
+    tail = path[len(prefix) :]
+    if not tail or "/" in tail:
+        return None
+    return unquote(tail)
+
+
 def require_float(payload: dict[str, Any], field: str) -> float:
     value = payload.get(field)
     if value is None:
         raise ValueError(f"missing required field: {field}")
     return float(value)
+
+
+def require_latitude(payload: dict[str, Any], field: str) -> float:
+    value = require_float(payload, field)
+    if value < -90.0 or value > 90.0:
+        raise ValueError("latitude must be between -90 and 90")
+    return value
+
+
+def require_longitude(payload: dict[str, Any], field: str) -> float:
+    value = require_float(payload, field)
+    if value < -180.0 or value > 180.0:
+        raise ValueError("longitude must be between -180 and 180")
+    return value
 
 
 def require_int(payload: dict[str, Any], field: str) -> int:
@@ -751,6 +954,59 @@ class CollectorHandler(BaseHTTPRequestHandler):
             return
 
         self.write_json(response, HTTPStatus.CREATED)
+
+    def do_PATCH(self) -> None:
+        parsed_path = urlparse(self.path).path
+        receiver_id = path_tail(parsed_path, "/receivers/")
+        if receiver_id is None:
+            self.write_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+
+        if not self.authorized():
+            self.write_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+            return
+
+        try:
+            payload = self.read_json_body()
+            if not isinstance(payload, dict):
+                raise ValueError("request body must be a JSON object")
+            response = self.store.update_receiver(receiver_id, payload)
+        except NotFoundError as exc:
+            self.write_json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+            return
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError) as exc:
+            self.write_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+
+        self.write_json(response)
+
+    def do_DELETE(self) -> None:
+        parsed_path = urlparse(self.path).path
+
+        try:
+            receiver_id = path_tail(parsed_path, "/receivers/")
+            if receiver_id is not None:
+                if not self.authorized():
+                    self.write_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                    return
+                self.write_json(self.store.delete_receiver(receiver_id))
+                return
+
+            device_ref = path_tail(parsed_path, "/devices/")
+            if device_ref is not None:
+                if not self.authorized():
+                    self.write_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                    return
+                self.write_json(self.store.delete_known_device(device_ref))
+                return
+        except NotFoundError as exc:
+            self.write_json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+            return
+        except ValueError as exc:
+            self.write_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+
+        self.write_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def authorized(self) -> bool:
         if not self.api_key:

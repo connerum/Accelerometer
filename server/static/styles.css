@@ -198,6 +198,22 @@ button:focus-visible {
   background: var(--blue-dark);
 }
 
+.button-danger {
+  border-color: #d8a3a0;
+  color: var(--red);
+}
+
+.button-danger:hover {
+  border-color: var(--red);
+  background: #fff4f2;
+}
+
+.button-small {
+  min-height: 32px;
+  padding: 5px 9px;
+  font-size: 0.82rem;
+}
+
 .segmented-control {
   margin-left: auto;
   border: 1px solid var(--strong-line);
@@ -272,70 +288,54 @@ button:focus-visible {
   margin-bottom: 14px;
 }
 
+.header-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .map-panel {
-  min-height: 380px;
+  min-height: 520px;
 }
 
 .map-surface {
-  position: relative;
-  min-height: 315px;
+  min-height: 455px;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background:
-    linear-gradient(rgba(102, 115, 129, 0.12) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(102, 115, 129, 0.12) 1px, transparent 1px),
-    var(--panel-alt);
-  background-size: 44px 44px;
+  background: var(--panel-alt);
 }
 
-.map-point {
-  position: absolute;
-  left: var(--x);
-  top: var(--y);
-  transform: translate(-50%, -50%);
-  display: grid;
-  place-items: center;
+.leaflet-container {
+  font-family: inherit;
+}
+
+.receiver-marker {
+  display: block;
+  border-radius: 6px;
+  background: #097c86;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 1px rgba(21, 32, 43, 0.35), 0 10px 22px rgba(21, 32, 43, 0.22);
+}
+
+.receiver-marker.manual {
+  background: #17803d;
+}
+
+.receiver-marker span {
+  display: block;
   width: 14px;
   height: 14px;
-  border-radius: 999px;
-  border: 2px solid #ffffff;
-  box-shadow: 0 0 0 1px rgba(21, 32, 43, 0.28), 0 10px 20px rgba(21, 32, 43, 0.18);
-}
-
-.map-point.device {
-  background: var(--blue);
-}
-
-.map-point.unknown {
-  background: var(--amber);
-}
-
-.map-point.stale {
-  background: #9aa6b2;
-}
-
-.map-point.receiver {
-  width: 18px;
-  height: 18px;
   border-radius: 4px;
-  background: var(--teal);
+  border: 2px solid rgba(255, 255, 255, 0.65);
+  margin: 2px;
 }
 
-.map-label {
-  position: absolute;
-  left: calc(var(--x) + 10px);
-  top: calc(var(--y) - 10px);
-  max-width: 170px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.leaflet-tooltip {
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.92);
-  color: var(--text);
-  padding: 3px 6px;
-  font-size: 0.75rem;
+  box-shadow: 0 8px 18px rgba(21, 32, 43, 0.18);
   font-weight: 700;
 }
 
@@ -356,7 +356,7 @@ button:focus-visible {
 
 table {
   width: 100%;
-  min-width: 980px;
+  min-width: 1100px;
   border-collapse: collapse;
 }
 
@@ -415,6 +415,18 @@ tbody tr:hover {
   justify-content: space-between;
   gap: 10px;
   font-weight: 800;
+}
+
+.receiver-actions,
+.receiver-label-field {
+  display: grid;
+  gap: 8px;
+}
+
+.action-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .empty-state {
